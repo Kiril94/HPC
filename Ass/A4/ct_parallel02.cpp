@@ -185,7 +185,7 @@ void reconstruction(int num_voxels, const std::string &input_dir, \
     else{
         stop_id = num_projections;
     }
-    //the computation drasticallt slows down if num_projections%mpi_size!=0    
+    //the computation drastically slows down if num_projections%mpi_size!=0    
     for (int projection_id = start_id; projection_id < stop_id;\
         ++projection_id) {
         //Measure reading time
@@ -202,9 +202,6 @@ void reconstruction(int num_voxels, const std::string &input_dir, \
             for (uint64_t i = 0; i < size; ++i) {
                 // Find the mapping between volume voxels and detector pixels for the current projection angle
                 float vol_det_map_0 = 0, vol_det_map_1 = 0, vol_det_map_2 = 0;
-        
-                //#pragma omp parallel for 
-                //reduction(+: vol_det_map_0, vol_det_map_1, vol_det_map_2)
                 for (uint64_t j = 0; j < 4; ++j) {
                     float combined_val = (j == 2) ? gdata.z_voxel_coords[z] \
                                         : gdata.combined_matrix[j * size + i];
