@@ -33,16 +33,35 @@ constexpr int detector_columns = 256;
  */
 std::vector<float> read_file(uint64_t size, uint64_t offset, const std::string &filename, \
                             int mpi_rank, int mpi_size) {
-    
     uint64_t offset_bin;
     MPI_File fh;
-    offset_bin = offset * sizeof(float) ;
+    //MPI_Request request;
+    offset_bin = offset * sizeof(float);
     std::vector<float> data(size,0);
-    MPI_Barrier(MPI_COMM_WORLD);
-    MPI_File_open(MPI_COMM_WORLD, filename.c_str(), MPI_MODE_RDONLY, MPI_INFO_NULL, &fh);       
-    MPI_File_read_at_all(fh, offset_bin, &data[0], size, MPI_FLOAT, MPI_STATUS_IGNORE);
-    MPI_File_close(&fh);
     
+    //This version also works
+    /*
+    MPI_Request request;
+    MPI_File_open(MPI_COMM_WORLD, filename.c_str(), MPI_MODE_RDONLY, MPI_INFO_NULL, &fh);
+    MPI_File_seek(fh, offset_bin, MPI_SEEK_SET);
+    MPI_File_iread(fh, &data[0], size, MPI_FLOAT, &request);
+    MPI_File_close(&fh);
+    */
+
+    //the version below works!!
+    /*MPI_Barrier(MPI_COMM_WORLD);
+    MPI_File_open(MPI_COMM_WORLD, filename.c_str(), MPI_MODE_RDONLY, MPI_INFO_NULL, &fh);
+    MPI_File_seek(fh, offset_bin, MPI_SEEK_SET);
+    MPI_File_read(fh, &data[0], size, MPI_FLOAT, MPI_STATUS_IGNORE);
+    MPI_File_close(&fh);
+    */
+    
+    // Lets try one more version 
+    MPI_File_open(MPI_COMM_WORLD, filename.c_str(), MPI_MODE_RDONLY, MPI_INFO_NULL, &fh);  
+    MPI_File_set_view(fh, offset_bin, MPI_FLOAT, MPI_FLOAT, "native", MPI_INFO_NULL);
+    MPI_File_read_all(fh, &data[0], size, MPI_FLOAT, MPI_STATUS_IGNORE);
+    MPI_File_close(&fh);
+
     return data;
     }
 
@@ -59,6 +78,7 @@ void write_file(std::vector<float> data, uint64_t offset, const std::string &fil
     }
     file.seekp(offset * sizeof(float), std::ios::beg);
     file.write(reinterpret_cast<char *>(&data[0]), data.size() * sizeof(float));
+    
 }
 
 /** CT data that are used for all projections */
@@ -90,12 +110,14 @@ public:
 GlobalData load_global_data(int num_voxels, const std::string &input_dir) {
     std::string voxel_dir = input_dir + "/" + std::to_string(num_voxels);
     GlobalData data;
-
     // Load combined X,Y voxel coordinates
-    data.combined_matrix = read_file(4 * num_voxels * num_voxels, 0, voxel_dir + "/combined.bin", mpi_rank, mpi_size);
+    data.combined_matrix = read_file(4 * num_voxels * num_voxels, 0,\
+                                     voxel_dir + "/combined.bin",mpi_rank, mpi_size);
 
     // Load Z voxel coordinates
-    data.z_voxel_coords = read_file(num_voxels, 0, voxel_dir + "/z_voxel_coords.bin", mpi_rank, mpi_size);
+    data.z_voxel_coords = read_file(num_voxels, 0,\
+                                    voxel_dir + "/z_voxel_coords.bin",\
+                                    mpi_rank, mpi_size);
 
     return data;
 }
@@ -107,22 +129,25 @@ GlobalData load_global_data(int num_voxels, const std::string &input_dir) {
  * @param input_dir      The CT data directory
  * @return               The projection specific CT data
  */
-ProjectionData load_projection_data(int projection_id, int num_voxels, const std::string &input_dir,\
+ProjectionData load_projection_data(int projection_id, int num_voxels,\
+                                    const std::string &input_dir,\
                                     int mpi_rank, int mpi_size) {
     std::string voxel_dir = input_dir + "/" + std::to_string(num_voxels);
     ProjectionData data;
 
     // Load 2D projection data
-    data.projection = read_file(detector_rows * detector_columns, projection_id * detector_rows * detector_columns,
-                                input_dir + "/projections.bin", mpi_rank, mpi_size);
+    data.projection = read_file(detector_rows * detector_columns, \
+    projection_id * detector_rows * detector_columns, \
+    input_dir + "/projections.bin", mpi_rank, mpi_size);
 
     // Load transform matrix used to align the 3D volume position towards the recorded 2D projection
-    data.transform_matrix = read_file(3 * 4, projection_id * 3 * 4, input_dir + "/transform.bin", mpi_rank,\
-                                    mpi_size);
+    data.transform_matrix = read_file(3 * 4, projection_id * 3 * 4, \
+    input_dir + "/transform.bin", mpi_rank, mpi_size);
 
     // Load volume weight used to compensate for cone beam ray density
-    data.volume_weight = read_file(num_voxels * num_voxels, projection_id * num_voxels * num_voxels,
-                                   voxel_dir + "/volumeweight.bin", mpi_rank, mpi_size);
+    data.volume_weight = read_file(num_voxels * num_voxels, projection_id \
+                        * num_voxels * num_voxels,\
+                        voxel_dir + "/volumeweight.bin", mpi_rank, mpi_size);
     return data;
 }
 
@@ -132,11 +157,14 @@ ProjectionData load_projection_data(int projection_id, int num_voxels, const std
  * @param input_dir        The CT data directory
  * @param output_filename  The name of the output file
  */
-void reconstruction(int num_voxels, const std::string &input_dir, const std::string &output_filename, \
+void reconstruction(int num_voxels, const std::string &input_dir, \
+                    const std::string &output_filename, \
                     int mpi_rank, int mpi_size) {
 
     // Notice, in this assignment we also times the disk access
     auto begin = std::chrono::steady_clock::now();
+    double reading_time = 0.0;
+    double omp_time = 0.0;
     GlobalData gdata = load_global_data(num_voxels, input_dir);
     // The size of the reconstruction volume is assumed a cube.
     uint64_t recon_volume_size = num_voxels * num_voxels \
@@ -145,27 +173,38 @@ void reconstruction(int num_voxels, const std::string &input_dir, const std::str
 
     // TODO: divide the projections between MPI-processes
     // projections in each process
-    
+    uint64_t size = num_voxels * num_voxels;
     int num_projections_l = num_projections/mpi_size;
     int start_id = mpi_rank * num_projections_l;
+    //if num_projections is not divisible by mpi size, 
+    //last rank gets the rest of the projections
     int stop_id;
-    // maybe add the case where num_projections is not divisible by mpi_size
-    stop_id = (mpi_rank + 1) * num_projections_l;
-    //std::cout<<"mpi rank: "<< mpi_rank<< ",  start_id: "<< start_id << ",  stop_id: "<< stop_id<<'\n';
+    if(mpi_rank!= (mpi_size-1) ){
+        stop_id = (mpi_rank + 1) * num_projections_l;
+    }
+    else{
+        stop_id = num_projections;
+    }
+    //the computation drasticallt slows down if num_projections%mpi_size!=0    
     for (int projection_id = start_id; projection_id < stop_id;\
         ++projection_id) {
-        //std::cout<<"mpi rank: "<< mpi_rank<< ",  projection id: "<< projection_id<<'\n';
+        //Measure reading time
+        auto begin_reading = std::chrono::steady_clock::now();
         ProjectionData pdata = load_projection_data(projection_id,\
                         num_voxels, input_dir, mpi_rank, mpi_size);
-
+        auto end_reading = std::chrono::steady_clock::now();
+        reading_time += (end_reading - begin_reading).count() / 1000000000.0;
         // TODO: Use OpenMP to parallelize local calculation
-        
+        // Measure computation time
+        auto begin_omp = std::chrono::steady_clock::now();
+        #pragma omp parallel for shared(pdata, gdata, recon_volume)
         for (int z = 0; z < num_voxels; ++z) {
-            uint64_t size = num_voxels * num_voxels;
-            #pragma omp parallel for
             for (uint64_t i = 0; i < size; ++i) {
                 // Find the mapping between volume voxels and detector pixels for the current projection angle
                 float vol_det_map_0 = 0, vol_det_map_1 = 0, vol_det_map_2 = 0;
+        
+                //#pragma omp parallel for 
+                //reduction(+: vol_det_map_0, vol_det_map_1, vol_det_map_2)
                 for (uint64_t j = 0; j < 4; ++j) {
                     float combined_val = (j == 2) ? gdata.z_voxel_coords[z] \
                                         : gdata.combined_matrix[j * size + i];
@@ -173,6 +212,7 @@ void reconstruction(int num_voxels, const std::string &input_dir, const std::str
                     vol_det_map_1 += combined_val * pdata.transform_matrix[j + 4];
                     vol_det_map_2 += combined_val * pdata.transform_matrix[j + 4 + 4];
                 }
+                
                 int32_t map_col = std::round(vol_det_map_0 / vol_det_map_2);
                 int32_t map_row = std::round(vol_det_map_1 / vol_det_map_2);
 
@@ -181,29 +221,39 @@ void reconstruction(int num_voxels, const std::string &input_dir, const std::str
                 if (map_col >= 0 && map_row >= 0 && map_col < detector_columns \
                         && map_row < detector_rows) {
                     // Add the weighted projection pixel values to their corresponding voxels in the z slice
+                   
                     recon_volume[z * size + i] +=
                             pdata.projection[map_col + map_row * detector_columns]\
                             * pdata.volume_weight[i];
                 }
             }
-                    }
+        }
+        auto end_omp = std::chrono::steady_clock::now();
+        omp_time += (end_omp - begin_omp).count() / 1000000000.0;
     }
     
     std::vector<float> recon_volume_final(recon_volume_size, 0.0);
     // TODO: gather `recon_volume_size` from all the MPI-processes and combine them into the final reconstruction
-    MPI_Barrier(MPI_COMM_WORLD);
     MPI_Reduce(&recon_volume[0], &recon_volume_final[0], recon_volume_size, MPI_FLOAT,\
                 MPI_SUM, 0, MPI_COMM_WORLD);
     MPI_Barrier(MPI_COMM_WORLD);
     if (mpi_rank == 0) {
+        auto begin_writing = std::chrono::steady_clock::now();
         if (!output_filename.empty()) {
             write_file(recon_volume_final, 0, output_filename);
         }
+        auto end_writing = std::chrono::steady_clock::now();
+        
         auto end = std::chrono::steady_clock::now();
         double checksum = 0;
-        checksum = std::accumulate(recon_volume_final.begin(), recon_volume_final.end(), 0.0);
+        checksum = std::accumulate(recon_volume_final.begin(), \
+        recon_volume_final.end(), 0.0);
         std::cout << "checksum: " << checksum << std::endl;
         std::cout << "elapsed time: " << (end - begin).count() / 1000000000.0 << " sec" << std::endl;
+        std::cout << "reading time: " << reading_time << " sec" << std::endl;
+        std::cout << "writing time: " <<\
+        (end_writing - begin_writing).count() / 1000000000.0 << " sec" << std::endl;
+        std::cout << "computation time: " << omp_time << " sec" << std::endl;
     }
 }
 
