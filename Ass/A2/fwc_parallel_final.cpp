@@ -42,29 +42,39 @@ public:
  * @param world_time The time of day, which defines the position of the sun.
  */
 
-
-void radiation_emission(World &world, double world_time) {
+/** Warm the world based on the position of the sun.
+ *
+ * @param world      The world to warm.
+ * @param world_time The time of day, which defines the position of the sun.
+ */
+void radiation(World &world, double world_time) {
     double sun_angle = std::cos(world_time);
     double sun_intensity = 865.0;
     double sun_long = (std::sin(sun_angle) * (world.longitude / 2)) + world.longitude / 2.;
     double sun_lat = world.latitude / 2.;
     double sun_height = 100. + std::cos(sun_angle) * 100.;
     double sun_height_squared = sun_height * sun_height;
-    std::vector<double> tmp = world.data;
-    #pragma omp parallel for collapse(2) 
+    #pragma omp parallel for shared(world)
     for (uint64_t i = 0; i < world.latitude; ++i) {
         for (uint64_t j = 0; j < world.longitude; ++j) {
             // Euclidean distance between the sun and each earth coordinate
-            double dist = sqrt((sun_lat - i) * (sun_lat - i) \
-                               + (sun_long - j) * (sun_long - j) + sun_height_squared);
-            world.data[i * world.longitude + j] += (sun_intensity / dist) \
-                * (1. - world.albedo_data[i * world.longitude + j]);
-            world.data[i * world.longitude + j] *= 0.99;
+            double dist = sqrt((sun_lat - i) * (sun_lat - i) + (sun_long - j) * (sun_long - j) + sun_height_squared);
+            world.data[i * world.longitude + j] += \
+                                          (sun_intensity / dist) * (1. - world.albedo_data[i * world.longitude + j]);
         }
     }
-    std::swap(world.data, tmp);
 }
 
+/** Heat radiated to space
+ *
+ * @param world  The world to update.
+ */
+void energy_emmision(World &world) {
+    #pragma omp parallel for shared(world)
+    for (uint64_t i = 0; i < world.latitude * world.longitude; ++i) {
+        world.data[i] *= 0.99;
+    }
+}
 
 /** Heat diffusion
  *
@@ -73,7 +83,7 @@ void radiation_emission(World &world, double world_time) {
 void diffuse(World &world) {
     std::vector<double> tmp = world.data;
     for (uint64_t k = 0; k < 10; ++k) {
-        #pragma omp parallel for collapse(2) private(tmp)
+        #pragma omp parallel for shared(tmp, world)
         for (uint64_t i = 1; i < world.latitude - 1; ++i) {
             for (uint64_t j = 1; j < world.longitude - 1; ++j) {
                 // 5 point stencil
@@ -95,7 +105,8 @@ void diffuse(World &world) {
  * @param world_time The time of day, which defines the position of the sun.
  */
 void integrate(World &world, double world_time) {
-    radiation_emission(world, world_time);
+    radiation(world, world_time);
+    energy_emmision(world);
     diffuse(world);
 }
 
@@ -167,10 +178,11 @@ void simulate(uint64_t num_of_iterations, const std::string &model_filename, con
 
     const double t_div = world.longitude / 36.0;
     std::vector <World> world_history;
-    uint64_t checksum = 0;
+    double checksum = 0;
     auto begin = std::chrono::steady_clock::now();
     for (uint64_t t = 0; t < num_of_iterations; ++t) {
         integrate(world, t / t_div);
+        checksum += std::accumulate(world.data.begin(), world.data.end(), 0.0);
         if (!output_filename.empty()) {
             world_history.push_back(world);
             /*std::cout << t << " -- min: " << *std::min_element(world.data.begin(), world.data.end())
@@ -188,6 +200,7 @@ void simulate(uint64_t num_of_iterations, const std::string &model_filename, con
         std::cout << "checksum: " << checksum << std::endl;
     }
     std::cout << "elapsed time: " << (end - begin).count() / 1000000000.0 << " sec" << std::endl;
+    std::cout << "checksum: " << checksum << std::endl;
 }
 
 /** Main function that parses the command line and start the simulation */
